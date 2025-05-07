@@ -8,6 +8,8 @@ void get_filetype(char *filename, char *filetype);          // 파일 이름 확
 void serve_dynamic(int fd, char *filename, char *cgiargs);  // CGI 프로그램을 실행해서 동적 콘텐츠를 생성하고 클라이언트에게 전송한다.
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,   // 클라이언트에게 HTTP 오류 메세지를 전송한다.
                  char *longmsg);
+void sigchild_handler(int sig);
+void echo(int connfd);
 
 int main(int argc, char **argv)
 {
@@ -21,6 +23,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
         exit(1);
     }
+    /* 11.8 문제 답안 */
+    if(Signal(SIGCHLD, sigchild_handler) == SIG_ERR) // 어떤 자식 프로세스든 종료되면 main 프로세스에게 SIGCHLD 시그널을 보내고 그러면 signal_handler함수가 실행된다.
+      unix_error("signal child handler error");      // 에러 메세지 출력하고 프로그램 종료시킴
+    /* 11.8 문제 답안 */
 
     listenfd = Open_listenfd(argv[1]);    // 포트 번호를 이용해 리스닝 소켓을 생성하고 listening 상태로 만든다.
     while (1) {
@@ -34,6 +40,32 @@ int main(int argc, char **argv)
     }
 }
 
+/* 11.6 문제 처리용 */
+void echo(int connfd){
+   size_t n;
+   char buf[MAXLINE];
+   rio_t rio;
+
+   Rio_readinitb(&rio, connfd);
+   while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0){
+    if (strcmp(buf, "\r\n") == 0)
+      break;
+    Rio_writen(connfd, buf, n);
+   }
+}
+/* 11.6 문제 처리용 */
+
+/* 11.8 문제 처리용 */
+void sigchild_handler(int sig){
+  int old_errno = errno;
+  int status;
+  pid_t pid;
+  while((pid = waitpid(-1, &status, WNOHANG)) > 0){
+  }
+  errno = old_errno;
+}
+/* 11.8 문제 처리용 */
+
 void doit(int fd){
   int is_static;      // 요청이 정적 컨텐츠(1)인지 동적컨텐츠(0)인지 나타내는 변수 
   struct stat sbuf;   // 파일의 상태 정보(크기, 권한 등)을 저장하는 구조체
@@ -43,7 +75,9 @@ void doit(int fd){
 
   // 요청라인과 헤더를 읽는 부분
   Rio_readinitb(&rio, fd);    // rio 구조체를 초기화해서 fd 소켓에서 읽을 준비를 한다.
-  Rio_readlineb(&rio, buf, MAXLINE);    // fd 소켓으로부터 HTTP 요청의 첫번째 라인(요청 라이)을 읽어 buf에 저장한다.
+  if(!(Rio_readlineb(&rio, buf, MAXLINE))){
+    return;
+  }    // fd 소켓으로부터 HTTP 요청의 첫번째 라인(요청 라인)을 읽어 buf에 저장한다.
   printf("Request headers:\n");
   printf("%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version);    //buf에 저장된 요청 라인을 공백을 기준으로 파싱해 method, uri, version 변수에 각각 저장
@@ -147,7 +181,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs){
     // 만약 디렉토리가 `/`로 끝난다면
     // 기본 파일인 `home.html`을 filename뒤에 추가
     if(uri[strlen(uri)-1] == '/')
-      strcat(filename, "home.html");
+      strcat(filename, "index.html");
     return 1;
   }
   // URI에 "cgi-bin" 문자열이 포함된 경우 -> CGI 요청으로 간주
@@ -171,45 +205,29 @@ int parse_uri(char *uri, char *filename, char *cgiargs){
 }
 
 void serve_static(int fd, char *filename, int filesize){
-  int srcfd;    // 요청한 파일을 열 때 사용할 파일 디스크립터
-  char *srcp, filetype[MAXLINE], buf[MAXLINE];    // 메모리 매핑된 파일의 시작 주소를 가리킬 포인터, 
-  // filetype 은 파일의 MIME 타입 저장
-  // buf 는 HTTP 응답 헤더 구성용
+  int srcfd;
+  char *srcp, filetype[MAXLINE], buf[MAXLINE];
   get_filetype(filename, filetype);
-  // 파일 이름 기반으로 MIME타입(filetype) 결정.
-  // 파일 확장자를 기반으로 MIME 타입 결정정
 
-  // HTTP 버전 및 성공상태 로드
   sprintf(buf, "HTTP/1.0 200 OK\r\n");
-  // 서버정보 헤더 추가
   sprintf(buf,"%sServer:Tiny Web Server\r\n",buf);
-  // 연결 방식 헤더 추가
   sprintf(buf,"%sConnection:close\r\n",buf);
-  // 콘텐츠 길이 헤더 추가
   sprintf(buf,"%sContent-length:%d\r\n",buf, filesize);
-  // 콘텐츠 타입 헤더 추가 (MIME 타입) + 헤더의 끝을 알리는 빈 줄
   sprintf(buf,"%sContent-type:%s\r\n\r\n",buf, filetype);
 
-  // 생성된 HTTP 응답 헤더를 클라이언트(fd)에게 전송
   Rio_writen(fd, buf, strlen(buf));
 
-  // 응답 헤더 내용 출력
   printf("Response headers:\n");
   printf("%s", buf);
 
-  // filename에 해당하는 파일을 읽기 전용(O_RDONLY)으로 염. srcfd에 파일 디스크립터 저장.
   srcfd = Open(filename, O_RDONLY, 0);
 
-  // 파일을 메모리에 맵핑(mmap).
-  // srcp는 매핑된 메모리 영역의 시작 주소를 가리킴.
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  srcp = (char*)malloc(filesize);
+  Rio_readn(srcfd, srcp, filesize);
 
-  // 파일디스크립터를 닫음
   Close(srcfd);
-  // 메모리에 있는 파일 내용 클라이언트에게 직접 전송
   Rio_writen(fd, srcp, filesize);
-  // 메모리 매핑 해제
-  Munmap(srcp, filesize);
+  free(srcp);
 }
 
 void get_filetype(char *filename, char *filetype){

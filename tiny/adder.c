@@ -5,11 +5,11 @@ int main(void){
     char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
     int n1 = 0, n2 = 0;
     
-    if((buf = getenv("QUERY_STRING")) != NULL){
+    if ((buf = getenv("QUERY_STRING")) != NULL) {
         p = strchr(buf, '&');
         *p = '\0';
-        sscanf(buf, "first=%d", &n1);
-        sscanf(p+1, "second=%d", &n2);
+        sscanf(buf, "first=%d", n1);
+        sscanf(p+1, "second=%d", n2);
     }
 
     // 요청 바디 만들기
